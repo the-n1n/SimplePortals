@@ -288,148 +288,214 @@ public class Listeners implements Listener {
     }
 
     // helpers
-    private void initiatePortalStuff(Location toLocation, Location fromLocation, Entity entity) {
-        final boolean isPlayer = (entity instanceof Player);
-        Portal portal = pluginInstance.getManager().getPortalAtLocation(toLocation);
-        if (portal == null) {
-            if (isPlayer) {
-                final Player player = ((Player) entity);
-                getPTPProtectionList().remove(player.getUniqueId());
-            }
+private void initiatePortalStuff(Location toLocation, Location fromLocation, Entity entity) {
+    // Early exit if entity hasn't actually moved between blocks
+    if (toLocation.getBlock().equals(fromLocation.getBlock())) return;
 
-            final Portal foundPortal = pluginInstance.getManager().getEntitiesInTeleportationAndPortals().getOrDefault(entity.getUniqueId(), null);
-            if (foundPortal != null && isPlayer) {
-                final Player player = ((Player) entity);
+    // Player-specific setup
+    final boolean isPlayer = entity instanceof Player;
+    final Player player = isPlayer ? (Player) entity : null;
 
-                pluginInstance.getManager().getEntitiesInTeleportationAndPortals().remove(player.getUniqueId());
+    // Cache config values locally
+    final int portalCooldownDuration = pluginInstance.getConfig().getInt("portal-cooldown-duration");
+    final boolean joinProtectionEnabled = pluginInstance.getConfig().getBoolean("join-protection");
+    final boolean usePortalCooldown = pluginInstance.getConfig().getBoolean("use-portal-cooldown");
+    final boolean bypassPortalPermissions = pluginInstance.getConfig().getBoolean("bypass-portal-permissions");
 
-                final TeleportTask teleportTask = pluginInstance.getManager().getTeleportTasks().getOrDefault(player.getUniqueId(), null);
-                if (teleportTask != null) teleportTask.cancel();
-                pluginInstance.getManager().getTeleportTasks().remove(player.getUniqueId());
+    // Find portal at location
+    final Portal portal = pluginInstance.getManager().getPortalAtLocation(toLocation);
+    
+    // Handle case where no portal is found
+    if (portal == null) {
+        if (isPlayer) handleNoPortalFound(player, fromLocation, entity);
+        return;
+    }
+    
+    // Skip if portal is disabled
+    if (portal.isDisabled()) return;
 
-                String title = pluginInstance.getLangConfig().getString("teleport-cancelled.title"),
-                        subTitle = pluginInstance.getLangConfig().getString("teleport-cancelled.sub-title");
-                if ((title != null && !title.isEmpty()) || (subTitle != null && !subTitle.isEmpty())) {
-                    player.sendTitle(pluginInstance.getManager().colorText(title),
-                            pluginInstance.getManager().colorText(subTitle), 0, 40, 0);
-                }
-            }
+    // Player-specific checks
+    if (isPlayer) {
+        // Check join protection
+        if (joinProtectionEnabled && getPTPProtectionList().contains(player.getUniqueId())) {
+            return;
         }
 
-        if (portal != null && !portal.isDisabled()) {
-            if (isPlayer) {
-                final Player player = (Player) entity;
+        // Check existing teleport tasks
+        final TeleportTask teleportTask = pluginInstance.getManager().getTeleportTasks().get(player.getUniqueId());
+        if (teleportTask != null && !teleportTask.isCancelled()) {
+            return;
+        }
 
-                // prevent teleporting due to join protection
-                if (pluginInstance.getConfig().getBoolean("join-protection") && getPTPProtectionList().contains(player.getUniqueId())) return;
+        // Check portal linking
+        final String linkedPortalId = pluginInstance.getManager().getPortalLinkMap().get(player.getUniqueId());
+        if (portal.getPortalId().equals(linkedPortalId)) {
+            return;
+        }
+        pluginInstance.getManager().getPortalLinkMap().remove(player.getUniqueId());
+    }
 
-                TeleportTask teleportTask = pluginInstance.getManager().getTeleportTasks().getOrDefault(player.getUniqueId(), null);
-                if (teleportTask != null && !teleportTask.isCancelled()) return;
+    // Fire portal enter event and check cancellation
+    if (firePortalEnterEvent(entity, portal, fromLocation)) {
+        return;
+    }
 
-                if (pluginInstance.getManager().getPortalLinkMap().containsKey(player.getUniqueId())
-                        && pluginInstance.getManager().getPortalLinkMap().get(player.getUniqueId()).equalsIgnoreCase(portal.getPortalId()))
-                    return;
-                else pluginInstance.getManager().getPortalLinkMap().remove(player.getUniqueId());
+    // Handle player-specific portal interactions
+    if (isPlayer) {
+        // Check cooldown and permissions
+        if (isCooldownOrPermissionFail(player, portal, portalCooldownDuration, bypassPortalPermissions)) {
+            applyKnockback(player, fromLocation, toLocation);
+            sendCooldownOrPermissionMessage(player, portalCooldownDuration);
+            return;
+        }
+
+        // Update cooldown if needed
+        if (usePortalCooldown && !player.hasPermission("simpleportals.cdbypass")) {
+            pluginInstance.getManager().updatePlayerPortalCooldown(player, "normal");
+        }
+
+        // Send portal messages
+        sendPortalMessages(player, portal, portalCooldownDuration);
+    }
+
+    // Perform the portal action
+    portal.performAction(entity);
+}
+
+/* Helper methods */
+
+private void handleNoPortalFound(Player player, Location fromLocation, Entity entity) {
+    getPTPProtectionList().remove(player.getUniqueId());
+
+    Portal foundPortal = pluginInstance.getManager().getEntitiesInTeleportationAndPortals().get(player.getUniqueId());
+    if (foundPortal != null) {
+        pluginInstance.getManager().getEntitiesInTeleportationAndPortals().remove(player.getUniqueId());
+
+        TeleportTask teleportTask = pluginInstance.getManager().getTeleportTasks().get(player.getUniqueId());
+        if (teleportTask != null) teleportTask.cancel();
+        pluginInstance.getManager().getTeleportTasks().remove(player.getUniqueId());
+
+        sendTeleportCancelledTitle(player);
+    }
+
+    pluginInstance.getManager().getPortalLinkMap().remove(player.getUniqueId());
+
+    if (!pluginInstance.getManager().getSmartTransferMap().isEmpty()
+            && pluginInstance.getManager().getSmartTransferMap().containsKey(player.getUniqueId())) {
+        SerializableLocation serializableLocation = pluginInstance.getManager().getSmartTransferMap().get(player.getUniqueId());
+        if (serializableLocation != null) {
+            Location location = player.getLocation();
+            if (location.getWorld() != null) {
+                serializableLocation.setWorldName(location.getWorld().getName());
+                serializableLocation.setX(location.getX());
+                serializableLocation.setY(location.getY());
+                serializableLocation.setZ(location.getZ());
+                serializableLocation.setYaw(location.getYaw());
+                serializableLocation.setPitch(location.getPitch());
+                return;
             }
-
-            PortalEnterEvent portalEnterEvent = new PortalEnterEvent(entity, portal, fromLocation, portal.getTeleportLocation().asBukkitLocation());
-            pluginInstance.getServer().getPluginManager().callEvent(portalEnterEvent);
-            if (portalEnterEvent.isCancelled()) return;
-
-            if (isPlayer) {
-                final Player player = (Player) entity;
-                final boolean canBypassCooldown = (player.hasPermission("simpleportals.cdbypass") || player.hasPermission("simpleportals.admin")),
-                        cooldownFail = (pluginInstance.getConfig().getBoolean("use-portal-cooldown")
-                                && (pluginInstance.getManager().isPlayerOnCooldown(player, "normal", pluginInstance.getConfig().getInt("portal-cooldown-duration"))) && !canBypassCooldown),
-                        permissionFail = !pluginInstance.getConfig().getBoolean("bypass-portal-permissions")
-                                && (!player.hasPermission("simpleportals.portal." + portal.getPortalId())
-                                && !player.hasPermission("simpleportals.portals." + portal.getPortalId())
-                                && !player.hasPermission("simpleportals.portal.*")
-                                && !player.hasPermission("simpleportals.portals.*")
-                                && !player.hasPermission("simpleportals.admin"));
-
-                if (cooldownFail || permissionFail) {
-                    double tv = pluginInstance.getConfig().getDouble("throw-velocity");
-                    if (!(tv <= -1)) {
-                        final Vector direction = new Vector(fromLocation.getX() - toLocation.getX(),
-                                ((fromLocation.getY() - toLocation.getY()) + (player.getVelocity().getY() / 2)),
-                                fromLocation.getZ() - toLocation.getZ()).multiply(tv);
-                        player.setVelocity(direction);
-                    }
-
-                    String message = cooldownFail ? pluginInstance.getLangConfig().getString("enter-cooldown-message")
-                            : pluginInstance.getLangConfig().getString("enter-no-permission-message");
-                    if (message != null && !message.equalsIgnoreCase(""))
-                        player.sendMessage(pluginInstance.getManager().colorText(pluginInstance.getLangConfig().getString("prefix")
-                                + message.replace("{time}", String.valueOf(pluginInstance.getManager().getCooldownTimeLeft(player, "normal",
-                                pluginInstance.getConfig().getInt("portal-cooldown-duration"))))));
-                    return;
-                }
-            }
-
-            if (isPlayer && pluginInstance.getConfig().getBoolean("use-portal-cooldown")) {
-                final Player player = (Player) entity;
-                final boolean canBypassCooldown = player.hasPermission("simpleportals.cdbypass");
-                if (!canBypassCooldown) pluginInstance.getManager().updatePlayerPortalCooldown((Player) entity, "normal");
-            }
-
-            if (portal.getTeleportLocation() != null) {
-                if (isPlayer) {
-                    final Player player = (Player) entity;
-                    if (portal.getMessage() != null && !portal.getMessage().isEmpty())
-                        player.sendMessage(pluginInstance.getManager().colorText(portal.getMessage().replace("{name}", portal.getPortalId())
-                                .replace("{time}", String.valueOf(pluginInstance.getManager().getCooldownTimeLeft(player, "normal",
-                                        pluginInstance.getConfig().getInt("portal-cooldown-duration"))))));
-
-                    if (portal.getBarMessage() != null && !portal.getBarMessage().isEmpty())
-                        pluginInstance.getManager().sendBarMessage(player, portal.getBarMessage().replace("{name}", portal.getPortalId())
-                                .replace("{time}", String.valueOf(pluginInstance.getManager().getCooldownTimeLeft(player, "normal",
-                                        pluginInstance.getConfig().getInt("portal-cooldown-duration")))));
-
-                    if ((portal.getTitle() != null && !portal.getTitle().isEmpty()) && (portal.getSubTitle() != null && !portal.getSubTitle().isEmpty()))
-                        pluginInstance.getManager().sendTitle(player, portal.getTitle().replace("{name}", portal.getPortalId())
-                                        .replace("{time}", String.valueOf(pluginInstance.getManager().getCooldownTimeLeft(player,
-                                                "normal", pluginInstance.getConfig().getInt("portal-cooldown-duration")))),
-                                portal.getSubTitle().replace("{name}", portal.getPortalId())
-                                        .replace("{time}", String.valueOf(pluginInstance.getManager().getCooldownTimeLeft(player,
-                                                "normal", pluginInstance.getConfig().getInt("portal-cooldown-duration")))));
-                    else if (portal.getTitle() != null && !portal.getTitle().isEmpty())
-                        pluginInstance.getManager().sendTitle(player, portal.getTitle().replace("{name}", portal.getPortalId())
-                                .replace("{time}", String.valueOf(pluginInstance.getManager().getCooldownTimeLeft(player,
-                                        "normal", pluginInstance.getConfig().getInt("portal-cooldown-duration")))), null);
-                    else if (portal.getSubTitle() != null && !portal.getSubTitle().isEmpty())
-                        pluginInstance.getManager().sendTitle(player, null, portal.getSubTitle().replace("{name}", portal.getPortalId())
-                                .replace("{time}", String.valueOf(pluginInstance.getManager().getCooldownTimeLeft(player,
-                                        "normal", pluginInstance.getConfig().getInt("portal-cooldown-duration")))));
-                }
-
-                portal.performAction(entity);
-            }
-        } else {
-            if (!isPlayer) return;
-            final Player player = (Player) entity;
-
-            pluginInstance.getManager().getPortalLinkMap().remove(player.getUniqueId());
-            if (!pluginInstance.getManager().getSmartTransferMap().isEmpty()
-                    && pluginInstance.getManager().getSmartTransferMap().containsKey(player.getUniqueId())) {
-                SerializableLocation serializableLocation = pluginInstance.getManager().getSmartTransferMap().get(player.getUniqueId());
-                if (serializableLocation != null) {
-                    Location location = player.getLocation();
-                    if (location.getWorld() != null) {
-                        serializableLocation.setWorldName(location.getWorld().getName());
-                        serializableLocation.setX(location.getX());
-                        serializableLocation.setY(location.getY());
-                        serializableLocation.setZ(location.getZ());
-                        serializableLocation.setYaw(location.getYaw());
-                        serializableLocation.setPitch(location.getPitch());
-                        return;
-                    }
-                }
-            }
-
-            pluginInstance.getManager().getSmartTransferMap().put(player.getUniqueId(), new SerializableLocation(pluginInstance, fromLocation));
         }
     }
+
+    pluginInstance.getManager().getSmartTransferMap().put(player.getUniqueId(), new SerializableLocation(pluginInstance, fromLocation));
+}
+
+private void sendTeleportCancelledTitle(Player player) {
+    String title = pluginInstance.getLangConfig().getString("teleport-cancelled.title");
+    String subTitle = pluginInstance.getLangConfig().getString("teleport-cancelled.sub-title");
+    if ((title != null && !title.isEmpty()) || (subTitle != null && !subTitle.isEmpty())) {
+        player.sendTitle(pluginInstance.getManager().colorText(title),
+                pluginInstance.getManager().colorText(subTitle), 0, 40, 0);
+    }
+}
+
+private boolean firePortalEnterEvent(Entity entity, Portal portal, Location fromLocation) {
+    PortalEnterEvent portalEnterEvent = new PortalEnterEvent(entity, portal, fromLocation, portal.getTeleportLocation().asBukkitLocation());
+    pluginInstance.getServer().getPluginManager().callEvent(portalEnterEvent);
+    return portalEnterEvent.isCancelled();
+}
+
+private boolean isCooldownOrPermissionFail(Player player, Portal portal, int cooldownDuration, boolean bypassPermissions) {
+    boolean canBypassCooldown = player.hasPermission("simpleportals.cdbypass") || player.hasPermission("simpleportals.admin");
+
+    boolean cooldownFail = pluginInstance.getConfig().getBoolean("use-portal-cooldown")
+            && pluginInstance.getManager().isPlayerOnCooldown(player, "normal", cooldownDuration)
+            && !canBypassCooldown;
+
+    boolean hasPortalPermission = player.hasPermission("simpleportals.portal." + portal.getPortalId())
+            || player.hasPermission("simpleportals.portals." + portal.getPortalId())
+            || player.hasPermission("simpleportals.portal.*")
+            || player.hasPermission("simpleportals.portals.*")
+            || player.hasPermission("simpleportals.admin");
+
+    boolean permissionFail = !bypassPermissions && !hasPortalPermission;
+
+    return cooldownFail || permissionFail;
+}
+
+private void applyKnockback(Player player, Location fromLocation, Location toLocation) {
+    double throwVelocity = pluginInstance.getConfig().getDouble("throw-velocity");
+    if (throwVelocity <= -1) return;
+
+    Vector direction = new Vector(
+            fromLocation.getX() - toLocation.getX(),
+            (fromLocation.getY() - toLocation.getY()) + (player.getVelocity().getY() / 2),
+            fromLocation.getZ() - toLocation.getZ()
+    ).multiply(throwVelocity);
+
+    player.setVelocity(direction);
+}
+
+private void sendCooldownOrPermissionMessage(Player player, int cooldownDuration) {
+    boolean cooldownFail = pluginInstance.getManager().isPlayerOnCooldown(player, "normal", cooldownDuration);
+    String messageKey = cooldownFail ? "enter-cooldown-message" : "enter-no-permission-message";
+    String message = pluginInstance.getLangConfig().getString(messageKey);
+    if (message != null && !message.isEmpty()) {
+        String prefix = pluginInstance.getLangConfig().getString("prefix");
+        long timeLeft = pluginInstance.getManager().getCooldownTimeLeft(player, "normal", cooldownDuration);
+        player.sendMessage(pluginInstance.getManager().colorText(prefix + message.replace("{time}", String.valueOf(timeLeft))));
+    }
+}
+
+private void sendPortalMessages(Player player, Portal portal, int cooldownDuration) {
+    if (portal.getMessage() != null && !portal.getMessage().isEmpty()) {
+        player.sendMessage(pluginInstance.getManager().colorText(
+                portal.getMessage()
+                        .replace("{name}", portal.getPortalId())
+                        .replace("{time}", String.valueOf(pluginInstance.getManager().getCooldownTimeLeft(player, "normal", cooldownDuration)))
+        ));
+    }
+
+    if (portal.getBarMessage() != null && !portal.getBarMessage().isEmpty()) {
+        pluginInstance.getManager().sendBarMessage(player,
+                portal.getBarMessage()
+                        .replace("{name}", portal.getPortalId())
+                        .replace("{time}", String.valueOf(pluginInstance.getManager().getCooldownTimeLeft(player, "normal", cooldownDuration))));
+    }
+
+    if (portal.getTitle() != null && !portal.getTitle().isEmpty() && portal.getSubTitle() != null && !portal.getSubTitle().isEmpty()) {
+        pluginInstance.getManager().sendTitle(player,
+                portal.getTitle()
+                        .replace("{name}", portal.getPortalId())
+                        .replace("{time}", String.valueOf(pluginInstance.getManager().getCooldownTimeLeft(player, "normal", cooldownDuration))),
+                portal.getSubTitle()
+                        .replace("{name}", portal.getPortalId())
+                        .replace("{time}", String.valueOf(pluginInstance.getManager().getCooldownTimeLeft(player, "normal", cooldownDuration)))
+        );
+    } else if (portal.getTitle() != null && !portal.getTitle().isEmpty()) {
+        pluginInstance.getManager().sendTitle(player,
+                portal.getTitle()
+                        .replace("{name}", portal.getPortalId())
+                        .replace("{time}", String.valueOf(pluginInstance.getManager().getCooldownTimeLeft(player, "normal", cooldownDuration))),
+                null);
+    } else if (portal.getSubTitle() != null && !portal.getSubTitle().isEmpty()) {
+        pluginInstance.getManager().sendTitle(player, null,
+                portal.getSubTitle()
+                        .replace("{name}", portal.getPortalId())
+                        .replace("{time}", String.valueOf(pluginInstance.getManager().getCooldownTimeLeft(player, "normal", cooldownDuration)))
+        );
+    }
+}
 
     private void vanillaPortalHelper(PlayerTeleportEvent e) {
         if (!e.getCause().name().toUpperCase().contains("PORTAL") && !e.getCause().name().toUpperCase().contains("GATEWAY")) return;

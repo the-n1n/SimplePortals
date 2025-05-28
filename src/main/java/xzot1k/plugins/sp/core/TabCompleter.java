@@ -43,6 +43,7 @@ public class TabCompleter implements org.bukkit.command.TabCompleter {
                 values.add("create");
                 values.add("delete");
                 values.add("fill");
+                values.add("find");
                 values.add("relocate");
                 values.add("addcommand");
                 values.add("clearcommands");
