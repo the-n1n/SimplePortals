@@ -24,7 +24,9 @@ import xzot1k.plugins.sp.core.tasks.ManagementTask;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.stream.Collectors;
 
 public class Commands implements CommandExecutor {
 
@@ -67,6 +69,9 @@ public class Commands implements CommandExecutor {
                         } else if (args[0].equalsIgnoreCase("info")) {
                             initiateInfo(sender);
                             return true;
+                        } else if (args[0].equalsIgnoreCase("find")) {
+                            initiateFind(sender, "1");
+                            return true;
                         }
 
                         break;
@@ -107,6 +112,9 @@ public class Commands implements CommandExecutor {
                         } else if (args[0].equalsIgnoreCase("help")) {
                             sendHelpPage(sender, args[1]);
                             return true;
+                        } else if (args[0].equalsIgnoreCase("find")) { // Add this new case for find with range
+                            initiateFind(sender, args[1]);
+                            return true;
                         }
 
                         break;
@@ -142,7 +150,93 @@ public class Commands implements CommandExecutor {
 
         return false;
     }
+    private void initiateFind(CommandSender sender, String rangeString) {
 
+        if (!sender.hasPermission("simpleportals.find")) {
+            sender.sendMessage(
+                    getPluginInstance().getManager().colorText(getPluginInstance().getLangConfig().getString("prefix")
+                            + getPluginInstance().getLangConfig().getString("no-permission-message")));
+            return;
+        }
+
+        if (!(sender instanceof Player)) {
+            sender.sendMessage(
+                    getPluginInstance().getManager().colorText(getPluginInstance().getLangConfig().getString("prefix")
+                            + getPluginInstance().getLangConfig().getString("must-be-player-message")));
+            return;
+        }
+
+        final Player player = (Player) sender;
+
+        // Validate range input
+        int range;
+        try {
+            range = Integer.parseInt(rangeString);
+        } catch (NumberFormatException e) {
+            sender.sendMessage(
+                    getPluginInstance().getManager().colorText(getPluginInstance().getLangConfig().getString("prefix")
+                            + getPluginInstance().getLangConfig().getString("invalid-range")));
+            return;
+        }
+
+        // Check range bounds (1-20)
+        if (range < 1) {
+            sender.sendMessage(
+                    getPluginInstance().getManager().colorText(getPluginInstance().getLangConfig().getString("prefix")
+                            + getPluginInstance().getLangConfig().getString("invalid-range-min")));
+            return;
+        }
+
+        if (range > 20) {
+            sender.sendMessage(
+                    getPluginInstance().getManager().colorText(getPluginInstance().getLangConfig().getString("prefix")
+                            + getPluginInstance().getLangConfig().getString("invalid-range-max")));
+            return;
+        }
+
+        final int finalRange = range;
+        List<Map.Entry<String, Portal>> list = getPluginInstance().getManager().getPortalMap().entrySet()
+                .parallelStream()
+                .filter(entry -> (entry.getValue().getRegion().getPoint1().distance(player.getLocation(),
+                        false) <= finalRange)
+                        || (entry.getValue().getRegion().getPoint2().distance(player.getLocation(),
+                                false) <= finalRange))
+                .limit(3).collect(Collectors.toList());
+
+        if (list.isEmpty()) {
+            sender.sendMessage(getPluginInstance().getManager()
+                    .colorText(getPluginInstance().getLangConfig().getString("prefix")
+                            + getPluginInstance().getLangConfig().getString("no-find-results")
+                                    .replace("{range}", String.valueOf(range))));
+            return;
+        }
+
+        final TextComponent message = new TextComponent(getPluginInstance().getManager()
+                .colorText(getPluginInstance().getLangConfig().getString(
+                        "prefix")
+                        + getPluginInstance().getLangConfig().getString("portal-find-message")
+                                .replace("{range}", String.valueOf(range))));
+        for (Map.Entry<String, Portal> entry : list) {
+            final Portal portal = entry.getValue();
+            final int x = (int) ((portal.getRegion().getPoint1().getX() + portal.getRegion().getPoint2().getX()) / 2),
+                    y = (int) ((portal.getRegion().getPoint1().getY() + portal.getRegion().getPoint2().getY()) / 2),
+                    z = (int) ((portal.getRegion().getPoint1().getZ() + portal.getRegion().getPoint2().getZ()) / 2);
+
+            final TextComponent portalText = new TextComponent(
+                    "\n" + getPluginInstance().getManager().getPortalName(portal, true));
+            portalText.setHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT,
+                    new BaseComponent[] { new TextComponent(
+                            getPluginInstance().getManager().colorText("&bClick to teleport to the portal &a"
+                                    + portal.getPortalId())) }));
+            portalText.setClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND,
+                    "/tppos " + x + " " + y + " " + z + " 0 0 " + portal.getRegion().getPoint1().getWorldName()));
+            message.addExtra(portalText);
+
+            portal.displayRegion(player);
+        }
+
+        sender.spigot().sendMessage(message);
+    }
 
     private void initiateDisableMessages(CommandSender sender, String portalName) {
         if (!sender.hasPermission("simpleportals.dm") && !sender.hasPermission("simpleportals.admin")) {

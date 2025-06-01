@@ -454,15 +454,14 @@ public class Manager {
                     1, 2, 1, 0, particleFixed, 50);
         }
 
-        final String sound = pluginInstance.getConfig().getString("teleport-sound");
-        if (sound != null && !sound.equalsIgnoreCase("")) {
-            final String soundFixed = sound.toUpperCase().replace(" ", "_").replace("-", "_");
-            for (int i = -1; ++i < Sound.values().length; ) {
-                Sound currentSound = Sound.values()[i];
-                if (currentSound.name().equalsIgnoreCase(soundFixed)) {
-                    location.getWorld().playSound(location, currentSound, 1, 1);
-                    break;
-                }
+        final String soundName = pluginInstance.getConfig().getString("teleport-sound");
+        if (soundName != null && !soundName.trim().isEmpty()) {
+            try {
+                // Modern Paper/Spigot (1.9+)
+                Sound sound = Sound.valueOf(soundName.toUpperCase().replace(" ", "_").replace("-", "_"));
+                location.getWorld().playSound(location, sound, 1f, 1f);
+            } catch (IllegalArgumentException e) {
+                pluginInstance.getLogger().warning("Invalid sound name in config: " + soundName);
             }
         }
     }
